@@ -1,0 +1,24 @@
+{
+  "name": "church-gemini-live-translator",
+  "version": "1.0.0",
+  "description": "Ultra-low latency Korean to German sermon translator with Gemini Live and browser clients",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js"
+  },
+  "keywords": [
+    "gemini",
+    "live",
+    "translation",
+    "websocket",
+    "church"
+  ],
+  "author": "Roo Code",
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "node-record-lpcm16": "^1.0.1",
+    "ws": "^8.18.0"
+  }
+}

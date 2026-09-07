@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Church Live Translator</title>
+    <style>
+      :root {
+        --bg: #0d1321;
+        --panel: #1b2a41;
+        --accent: #5eead4;
+        --text: #edf2f7;
+        --muted: #a7b4c6;
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: radial-gradient(circle at top, #1f3c5d 0%, var(--bg) 48%);
+        color: var(--text);
+        font-family: Arial, sans-serif;
+      }
+
+      .app {
+        width: min(92vw, 700px);
+        background: rgba(21, 32, 48, 0.92);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 18px;
+        box-shadow: 0 20px 50px rgba(0, 0, 0, 0.35);
+        padding: 28px;
+      }
+
+      h1 {
+        margin: 0 0 12px;
+        font-size: clamp(28px, 5vw, 38px);
+      }
+
+      p {
+        color: var(--muted);
+        line-height: 1.5;
+      }
+
+      button {
+        border: 0;
+        background: linear-gradient(135deg, #34d399, #14b8a6);
+        color: #062b2b;
+        font-weight: 700;
+        padding: 14px 20px;
+        border-radius: 12px;
+        cursor: pointer;
+        font-size: 16px;
+        margin-top: 16px;
+      }
+
+      .status {
+        margin-top: 18px;
+        padding: 12px 14px;
+        background: rgba(255, 255, 255, 0.04);
+        border-radius: 10px;
+        color: var(--text);
+        min-height: 48px;
+      }
+
+      .subtitle {
+        margin-top: 16px;
+        color: var(--accent);
+        font-weight: 700;
+        min-height: 24px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <h1>Church Live Translator</h1>
+      <p>Connect to the local Wi-Fi broadcast and start listening to the sermon in real time.</p>
+      <button id="startButton" type="button">▶ Start Listening</button>
+      <div id="status" class="status">Waiting for audio stream…</div>
+      <div id="subtitle" class="subtitle">No subtitle yet.</div>
+    </div>
+
+    <script>
+      const statusEl = document.getElementById('status');
+      const subtitleEl = document.getElementById('subtitle');
+      const startButton = document.getElementById('startButton');
+
+      let audioContext = null;
+      let nextPlayTime = 0;
+      let socket = null;
+      let receivedAudioChunks = 0;
+      let pendingPcmByte = null;
+
+      function logStatus(text) {
+        statusEl.textContent = text;
+      }
+
+      async function ensureAudioContext() {
+        if (!audioContext) {
+          audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        if (audioContext.state === 'suspended') {
+          await audioContext.resume();
+        }
+        if (audioContext.state !== 'running') {
+          throw new Error(`AudioContext state is ${audioContext.state}`);
+        }
+      }
+
+      function decodePcm16ToFloat32(buffer) {
+        const incoming = new Uint8Array(buffer);
+        let pcmBytes = incoming;
+
+        if (pendingPcmByte) {
+          pcmBytes = new Uint8Array(pendingPcmByte.length + incoming.length);
+          pcmBytes.set(pendingPcmByte, 0);
+          pcmBytes.set(incoming, pendingPcmByte.length);
+          pendingPcmByte = null;
+        }
+
+        if (pcmBytes.length % 2 !== 0) {
+          pendingPcmByte = pcmBytes.slice(pcmBytes.length - 1);
+          pcmBytes = pcmBytes.slice(0, pcmBytes.length - 1);
+        }
+
+        if (pcmBytes.length === 0) {
+          return null;
+        }
+
+        const int16 = new Int16Array(pcmBytes.buffer, pcmBytes.byteOffset, pcmBytes.byteLength / 2);
+        const float32 = new Float32Array(int16.length);
+
+        for (let i = 0; i < int16.length; i++) {
+          float32[i] = int16[i] / 32768;
+        }
+
+        return float32;
+      }
+
+      function queueAudioChunk(chunkBuffer) {
+        if (!audioContext) return;
+
+        const monoFloat = decodePcm16ToFloat32(chunkBuffer);
+        if (!monoFloat) return;
+
+        const audioBuffer = audioContext.createBuffer(1, monoFloat.length, 24000);
+        const channelData = audioBuffer.getChannelData(0);
+        channelData.set(monoFloat);
+
+        const source = audioContext.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(audioContext.destination);
+
+        const startAt = Math.max(audioContext.currentTime + 0.05, nextPlayTime);
+        source.start(startAt);
+        nextPlayTime = startAt + audioBuffer.duration;
+      }
+
+      function connectSocket() {
+        const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        socket = new WebSocket(`${protocol}//${location.host}/ws`);
+
+        socket.binaryType = 'arraybuffer';
+
+        socket.addEventListener('open', () => {
+          logStatus('Connected to live sermon stream.');
+        });
+
+        socket.addEventListener('message', (event) => {
+          if (typeof event.data === 'string') {
+            try {
+              const payload = JSON.parse(event.data);
+              if (payload && payload.text) {
+                subtitleEl.textContent = payload.text;
+              }
+            } catch (_) {
+              // ignore non-JSON text messages
+            }
+            return;
+          }
+
+          const chunk = new Uint8Array(event.data);
+          if (chunk.length > 0) {
+            receivedAudioChunks += 1;
+            logStatus(`Audio connected. Received ${receivedAudioChunks} audio chunks.`);
+            try {
+              queueAudioChunk(chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength));
+            } catch (error) {
+              logStatus(`Audio decode error: ${error.message}`);
+              console.error('Audio decode error:', error);
+            }
+          }
+        });
+
+        socket.addEventListener('close', () => {
+          logStatus('Connection closed. Reconnect or refresh the page.');
+        });
+
+        socket.addEventListener('error', () => {
+          logStatus('Socket error. Please refresh and retry.');
+        });
+      }
+
+      startButton.addEventListener('click', async () => {
+        try {
+          await ensureAudioContext();
+          logStatus('Audio unlocked. Listening...');
+          if (!socket || socket.readyState !== WebSocket.OPEN) {
+            connectSocket();
+          }
+        } catch (error) {
+          logStatus(`Audio output unavailable: ${error.message}`);
+          console.error('AudioContext error:', error);
+        }
+      });
+    </script>
+  </body>
+</html>
